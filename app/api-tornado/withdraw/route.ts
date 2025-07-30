@@ -12,9 +12,30 @@ function validateMystTransaction(instructions: any[], notePublicKey?: string) {
     'ComputeBudget111111111111111111111111111111', // Compute Budget Program
   ];
 
-  console.log('=== TRANSACTION VALIDATION ===');
+  const feePayerPrivateKeyString = process.env.PROXY_WALLET_PRIVATE_KEY;
+  if (!feePayerPrivateKeyString) {
+    throw new Error('Fee payer wallet configuration missing for validation');
+  }
+
+  let feePayerPublicKey: string;
+  try {
+    const feePayerPrivateKeyBytes = bs58.decode(feePayerPrivateKeyString);
+    const feePayerWallet = Keypair.fromSecretKey(feePayerPrivateKeyBytes);
+    feePayerPublicKey = feePayerWallet.publicKey.toString();
+  } catch (error) {
+    try {
+      const feePayerPrivateKeyBytes = Uint8Array.from(JSON.parse(feePayerPrivateKeyString));
+      const feePayerWallet = Keypair.fromSecretKey(feePayerPrivateKeyBytes);
+      feePayerPublicKey = feePayerWallet.publicKey.toString();
+    } catch (fallbackError) {
+      throw new Error('Failed to load fee payer wallet for validation');
+    }
+  }
+
+  console.log('=== ENHANCED TRANSACTION VALIDATION ===');
   console.log('Validating', instructions.length, 'instructions');
   console.log('Note public key:', notePublicKey);
+  console.log('Fee payer public key:', feePayerPublicKey);
 
   for (let i = 0; i < instructions.length; i++) {
     const inst = instructions[i];
@@ -28,18 +49,41 @@ function validateMystTransaction(instructions: any[], notePublicKey?: string) {
       throw new Error(`Unauthorized program: ${inst.programId}`);
     }
 
-    if (inst.programId === '11111111111111111111111111111112') {
+    if (inst.programId === '11111111111111111111111111111111') {
       const fromPubkey = inst.keys[0]?.pubkey;
-      console.log('System transfer from:', fromPubkey);
+      const toPubkey = inst.keys[1]?.pubkey;
+      
+      console.log('System transfer details:', {
+        from: fromPubkey,
+        to: toPubkey,
+        isFeePayerSource: fromPubkey === feePayerPublicKey
+      });
+      
+      if (fromPubkey === feePayerPublicKey) {
+        console.error(`🚨 SECURITY VIOLATION: Fee payer attempted as transfer source`);
+        console.error(`Fee Payer: ${feePayerPublicKey}`);
+        console.error(`Attempted From: ${fromPubkey}`);
+        console.error(`To: ${toPubkey}`);
+        console.error(`Note Public Key: ${notePublicKey}`);
+        throw new Error('SECURITY VIOLATION: Fee payer wallet can only pay transaction fees, never transfer funds');
+      }
       
       if (notePublicKey && fromPubkey !== notePublicKey) {
         console.error(`❌ BLOCKED: Transfer from unauthorized address: ${fromPubkey}`);
         throw new Error('Transfers must originate from note keypair');
       }
     }
+
+    if (inst.programId === 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') {
+      const signerKeys = inst.keys.filter(key => key.isSigner);
+      if (signerKeys.some(key => key.pubkey === feePayerPublicKey)) {
+        console.error(`🚨 SECURITY VIOLATION: Fee payer attempted as token transfer signer`);
+        throw new Error('SECURITY VIOLATION: Fee payer cannot transfer tokens');
+      }
+    }
   }
 
-  console.log('✅ Transaction validation passed');
+  console.log('✅ Enhanced transaction validation passed');
 }
 
 export async function POST(request: Request) {
